@@ -54,6 +54,11 @@ if ! command -v ip6tables &> /dev/null; then
     PACKAGE="${PACKAGE} iptables"
 fi
 
+if ! command -v iptables-persistent &> /dev/null; then
+    INSTALL=true
+    PACKAGE="${PACKAGE} iptables-persistent"
+fi
+
 if ! command -v wget &> /dev/null; then
     INSTALL=true
     PACKAGE="${PACKAGE} wget"
