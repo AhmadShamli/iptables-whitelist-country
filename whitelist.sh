@@ -20,6 +20,9 @@ IPSET_NAME_IPV6="allowed_country_ips_ipv6"
 IPTABLES_CHAIN_IPV4="ALLOW_COUNTRY_IPV4"
 IPTABLES_CHAIN_IPV6="ALLOW_COUNTRY_IPV6"
 
+# Backup directory for iptables rules
+BACKUP_DIR="/etc/iptables/backup"
+
 # Check for required files
 FILES_MISSING=false
 if [[ ! -f $LOCATIONS_DB || ! -f $BLOCKS_IPV4_DB || ! -f $BLOCKS_IPV6_DB ]]; then
@@ -47,6 +50,13 @@ if ! command -v wget &> /dev/null; then
     sudo apt-get update
     sudo apt-get install -y wget
 fi
+
+# Backup current iptables rules
+TIMESTAMP=$(date +"%Y%m%d%H%M%S")
+sudo mkdir -p $BACKUP_DIR
+sudo iptables-save > $BACKUP_DIR/rules.v4.$TIMESTAMP
+sudo ip6tables-save > $BACKUP_DIR/rules.v6.$TIMESTAMP
+echo "Backup of current iptables rules saved at $BACKUP_DIR/rules.v4.$TIMESTAMP and $BACKUP_DIR/rules.v6.$TIMESTAMP"
 
 # Create new ipsets
 sudo ipset create $IPSET_NAME_IPV4 hash:net
@@ -110,6 +120,10 @@ do
     ip6tables -A INPUT -s "$ip" -j ACCEPT
 done
 
+# Allow all outgoing traffic
+sudo iptables -A OUTPUT -j ACCEPT
+sudo ip6tables -A OUTPUT -j ACCEPT
+
 # Add rules to drop all other incoming traffic
 sudo iptables -A $IPTABLES_CHAIN_IPV4 -j DROP
 sudo ip6tables -A $IPTABLES_CHAIN_IPV6 -j DROP
@@ -118,6 +132,9 @@ sudo ip6tables -A $IPTABLES_CHAIN_IPV6 -j DROP
 sudo iptables -A INPUT -j $IPTABLES_CHAIN_IPV4
 sudo ip6tables -A INPUT -j $IPTABLES_CHAIN_IPV6
 
+# Create directory if it doesn't exist
+sudo mkdir -p /etc/iptables
+
 # Save the iptables rules
 sudo iptables-save > /etc/iptables/rules.v4
 sudo ip6tables-save > /etc/iptables/rules.v6
@@ -125,4 +142,9 @@ sudo ip6tables-save > /etc/iptables/rules.v6
 # Save the ipset rules
 sudo ipset save > /etc/ipset.conf
 
+# If netfilter-persistent is installed, reload the rules
+if command -v netfilter-persistent &> /dev/null; then
+    sudo netfilter-persistent save
+    sudo netfilter-persistent reload
+fi
 echo "IPTables and IPSet rules have been configured to allow only incoming connections from specified countries and whitelisted IPs."
