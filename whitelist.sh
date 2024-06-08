@@ -31,24 +31,37 @@ if [[ ! -f $LOCATIONS_DB || ! -f $BLOCKS_IPV4_DB || ! -f $BLOCKS_IPV6_DB ]]; the
 fi
 
 # Install necessary tools if not already installed (Ubuntu/Debian example)
+echo "Checking necessary tools and install when needed."
+INSTALL=false
+PACKAGE=""
 if ! command -v ipset &> /dev/null; then
-    sudo apt-get update
-    sudo apt-get install -y ipset
+    INSTALL=true
+    PACKAGE="${PACKAGE} ipset"
+fi
+
+if ! command -v netfilter-persistent &> /dev/null; then
+    INSTALL=true
+    PACKAGE="${PACKAGE} netfilter-persistent"
 fi
 
 if ! command -v iptables &> /dev/null; then
-    sudo apt-get update
-    sudo apt-get install -y iptables
+    INSTALL=true
+    PACKAGE="${PACKAGE} iptables"
 fi
 
 if ! command -v ip6tables &> /dev/null; then
-    sudo apt-get update
-    sudo apt-get install -y iptables
+    INSTALL=true
+    PACKAGE="${PACKAGE} iptables"
 fi
 
 if ! command -v wget &> /dev/null; then
+    INSTALL=true
+    PACKAGE="${PACKAGE} wget"
+fi
+
+if [ "$INSTALL" = true ]; then
     sudo apt-get update
-    sudo apt-get install -y wget
+    sudo apt-get install -y $PACKAGE
 fi
 
 # Backup current iptables rules
@@ -58,15 +71,27 @@ sudo iptables-save > $BACKUP_DIR/rules.v4.$TIMESTAMP
 sudo ip6tables-save > $BACKUP_DIR/rules.v6.$TIMESTAMP
 echo "Backup of current iptables rules saved at $BACKUP_DIR/rules.v4.$TIMESTAMP and $BACKUP_DIR/rules.v6.$TIMESTAMP"
 
+# Check if the ipsets already exist and destroy them if they do
+echo "Checking and destroying existing ipsets."
+if sudo ipset list $IPSET_NAME_IPV4 &> /dev/null; then
+    sudo ipset destroy $IPSET_NAME_IPV4
+fi
+if sudo ipset list $IPSET_NAME_IPV6 &> /dev/null; then
+    sudo ipset destroy $IPSET_NAME_IPV6
+fi
+
 # Create new ipsets
+echo "Creating new ipsets."
 sudo ipset create $IPSET_NAME_IPV4 hash:net
 sudo ipset create $IPSET_NAME_IPV6 hash:net family inet6
 
 # Flush the ipsets (remove all existing entries)
+echo "Flushing ipsets."
 sudo ipset flush $IPSET_NAME_IPV4
 sudo ipset flush $IPSET_NAME_IPV6
 
 if [ "$FILES_MISSING" = false ]; then
+    echo "Getting IPs from GeoIP files."
     # Map country ISO codes to geoname IDs
     declare -A GEONAME_IDS
     while IFS=',' read -r geoname_id locale_code continent_code continent_name country_iso_code country_name is_in_european_union; do
@@ -100,33 +125,46 @@ else
     done
 fi
 
+# Flush existing rules
+iptables -F
+iptables -X
+ip6tables -F
+ip6tables -X
+
+# Default policy to drop all incoming traffic except outbound
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT ACCEPT
+ip6tables -P INPUT DROP
+ip6tables -P FORWARD DROP
+ip6tables -P OUTPUT ACCEPT
+
 # Create new iptables chains
 sudo iptables -N $IPTABLES_CHAIN_IPV4
 sudo ip6tables -N $IPTABLES_CHAIN_IPV6
 
-# Add rules to allow traffic from the IP ranges in the ipsets
-sudo iptables -A $IPTABLES_CHAIN_IPV4 -m set --match-set $IPSET_NAME_IPV4 src -j ACCEPT
-sudo ip6tables -A $IPTABLES_CHAIN_IPV6 -m set --match-set $IPSET_NAME_IPV6 src -j ACCEPT
+# Allow loopback interface (localhost)
+iptables -A INPUT -i lo -j ACCEPT
+ip6tables -A INPUT -i lo -j ACCEPT
 
-# Allow incoming traffic from specific IP addresses (IPv4)
+# Allow established and related incoming connections
+iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+# Allow incoming traffic from specific IP addresses
 for ip in "${ALLOWED_IPS[@]}"
 do
     iptables -A INPUT -s "$ip" -j ACCEPT
 done
 
-# Allow incoming traffic from specific IP addresses (IPv6)
 for ip in "${ALLOWED_IPS_V6[@]}"
 do
     ip6tables -A INPUT -s "$ip" -j ACCEPT
 done
 
-# Allow all outgoing traffic
-sudo iptables -A OUTPUT -j ACCEPT
-sudo ip6tables -A OUTPUT -j ACCEPT
-
-# Add rules to drop all other incoming traffic
-sudo iptables -A $IPTABLES_CHAIN_IPV4 -j DROP
-sudo ip6tables -A $IPTABLES_CHAIN_IPV6 -j DROP
+# Add rules to allow traffic from the IP ranges in the ipsets
+sudo iptables -A $IPTABLES_CHAIN_IPV4 -m set --match-set $IPSET_NAME_IPV4 src -j ACCEPT
+sudo ip6tables -A $IPTABLES_CHAIN_IPV6 -m set --match-set $IPSET_NAME_IPV6 src -j ACCEPT
 
 # Apply the new chains to incoming connections on the INPUT chain
 sudo iptables -A INPUT -j $IPTABLES_CHAIN_IPV4
