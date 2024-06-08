@@ -185,4 +185,26 @@ if command -v netfilter-persistent &> /dev/null; then
     sudo netfilter-persistent save
     sudo netfilter-persistent reload
 fi
+
+# Check if the ipset restore service already exists
+if [ ! -f /etc/systemd/system/ipset-restore.service ]; then
+    # Create ipset restore service
+    cat << EOF | sudo tee /etc/systemd/system/ipset-restore.service
+[Unit]
+Description=Restore ipset rules
+Before=netfilter-persistent.service
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ipset restore -f /etc/ipset.conf
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Enable and start the ipset restore service
+    sudo systemctl enable ipset-restore.service
+    sudo systemctl start ipset-restore.service
+fi
+
 echo "IPTables and IPSet rules have been configured to allow only incoming connections from specified countries and whitelisted IPs."
