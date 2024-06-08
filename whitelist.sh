@@ -61,7 +61,7 @@ if [ "$FILES_MISSING" = false ]; then
     declare -A GEONAME_IDS
     while IFS=',' read -r geoname_id locale_code continent_code continent_name country_iso_code country_name is_in_european_union; do
         for country in "${COUNTRY_CODES[@]}"; do
-            if [[ "$country_iso_code" == "$country" ]]; then
+            if [[ "${country_iso_code^^}" == "${country^^}" ]]; then
                 GEONAME_IDS[$geoname_id]=1
             fi
         done
@@ -82,11 +82,11 @@ if [ "$FILES_MISSING" = false ]; then
 else
     # Fallback to ipdeny.com for each country
     for COUNTRY_CODE in "${COUNTRY_CODES[@]}"; do
-        wget -O /tmp/${COUNTRY_CODE}.zone http://www.ipdeny.com/ipblocks/data/countries/${COUNTRY_CODE}.zone
-        for ip in $(cat /tmp/${COUNTRY_CODE}.zone); do
+        wget -O /tmp/${COUNTRY_CODE,,}.zone http://www.ipdeny.com/ipblocks/data/countries/${COUNTRY_CODE,,}.zone
+        for ip in $(cat /tmp/${COUNTRY_CODE,,}.zone); do
             sudo ipset add $IPSET_NAME_IPV4 $ip
         done
-        rm /tmp/${COUNTRY_CODE}.zone
+        rm /tmp/${COUNTRY_CODE,,}.zone
     done
 fi
 
