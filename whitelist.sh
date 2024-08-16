@@ -68,16 +68,18 @@ if ! command -v wget &> /dev/null; then
 fi
 
 if [ "$INSTALL" = true ]; then
+    echo "Installing missing packages: $PACKAGE"
     sudo apt-get update
     sudo apt-get install -y $PACKAGE
 fi
 
 # Backup current iptables rules
+echo "Backing up current iptables rules."
 TIMESTAMP=$(date +"%Y%m%d%H%M%S")
 sudo mkdir -p $BACKUP_DIR
 sudo iptables-save > $BACKUP_DIR/rules.v4.$TIMESTAMP
 sudo ip6tables-save > $BACKUP_DIR/rules.v6.$TIMESTAMP
-echo "Backup of current iptables rules saved at $BACKUP_DIR/rules.v4.$TIMESTAMP and $BACKUP_DIR/rules.v6.$TIMESTAMP"
+echo "Backup saved at $BACKUP_DIR/rules.v4.$TIMESTAMP and $BACKUP_DIR/rules.v6.$TIMESTAMP"
 
 # Check if the ipsets already exist and destroy them if they do
 echo "Checking and destroying existing ipsets."
@@ -101,7 +103,7 @@ sudo ipset flush $IPSET_NAME_IPV6
 # Process country codes if not empty
 if [ ${#COUNTRY_CODES[@]} -gt 0 ]; then
     if [ "$FILES_MISSING" = false ]; then
-        echo "Getting IPs from GeoIP files."
+        echo "Processing country codes from GeoIP files."
         # Map country ISO codes to geoname IDs
         declare -A GEONAME_IDS
         while IFS=',' read -r geoname_id locale_code continent_code continent_name country_iso_code country_name is_in_european_union; do
@@ -126,6 +128,7 @@ if [ ${#COUNTRY_CODES[@]} -gt 0 ]; then
         done < <(tail -n +2 $BLOCKS_IPV6_DB)
     else
         # Fallback to ipdeny.com for each country
+        echo "Falling back to ipdeny.com to download IP blocks."
         for COUNTRY_CODE in "${COUNTRY_CODES[@]}"; do
             wget -O /tmp/${COUNTRY_CODE,,}.zone http://www.ipdeny.com/ipblocks/data/countries/${COUNTRY_CODE,,}.zone
             for ip in $(cat /tmp/${COUNTRY_CODE,,}.zone); do
@@ -136,13 +139,15 @@ if [ ${#COUNTRY_CODES[@]} -gt 0 ]; then
     fi
 fi
 
-# Flush existing rules
+# Flush existing iptables rules
+echo "Flushing existing iptables rules."
 iptables -F
 iptables -X
 ip6tables -F
 ip6tables -X
 
 # Default policy to drop all incoming traffic except outbound
+echo "Setting default policy to drop all incoming traffic."
 iptables -P INPUT DROP
 iptables -P FORWARD DROP
 iptables -P OUTPUT ACCEPT
@@ -151,22 +156,27 @@ ip6tables -P FORWARD DROP
 ip6tables -P OUTPUT ACCEPT
 
 # Create new iptables chains
+echo "Creating new iptables chains."
 sudo iptables -N $IPTABLES_CHAIN_IPV4
 sudo ip6tables -N $IPTABLES_CHAIN_IPV6
 
 # Allow loopback interface (localhost)
+echo "Allowing loopback interface (localhost)."
 iptables -A INPUT -i lo -j ACCEPT
 ip6tables -A INPUT -i lo -j ACCEPT
 
 # Allow established and related incoming connections
+echo "Allowing established and related incoming connections."
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-# Allow ipv6 icmp, without it, ipv6 network might be unreachable as certain ipv6 important feature is not enabled (NDP)
+# Allow IPv6 ICMP for network reachability
+echo "Allowing IPv6 ICMP for network reachability."
 ip6tables -A INPUT -p icmpv6 -j ACCEPT
 
 # Allow incoming traffic from specific IP addresses if ALLOWED_IPS is not empty
 if [ ${#ALLOWED_IPS[@]} -gt 0 ]; then
+    echo "Allowing incoming traffic from specific IPv4 addresses."
     for ip in "${ALLOWED_IPS[@]}"
     do
         iptables -A INPUT -s "$ip" -j ACCEPT
@@ -175,6 +185,7 @@ fi
 
 # Allow incoming traffic from specific IPv6 addresses if ALLOWED_IPS_V6 is not empty
 if [ ${#ALLOWED_IPS_V6[@]} -gt 0 ]; then
+    echo "Allowing incoming traffic from specific IPv6 addresses."
     for ip in "${ALLOWED_IPS_V6[@]}"
     do
         ip6tables -A INPUT -s "$ip" -j ACCEPT
@@ -183,6 +194,7 @@ fi
 
 # Allow incoming traffic on specified ports from any IP if ALLOWED_PORTS is not empty
 if [ ${#ALLOWED_PORTS[@]} -gt 0 ]; then
+    echo "Allowing incoming traffic on specified ports from any IP."
     for port in "${ALLOWED_PORTS[@]}"
     do
         iptables -A INPUT -p tcp --dport "$port" -j ACCEPT
@@ -192,28 +204,32 @@ fi
 
 # Add rules to allow traffic from the IP ranges in the ipsets if COUNTRY_CODES is not empty
 if [ ${#COUNTRY_CODES[@]} -gt 0 ]; then
+    echo "Adding rules to allow traffic from the IP ranges in the ipsets."
     sudo iptables -A $IPTABLES_CHAIN_IPV4 -m set --match-set $IPSET_NAME_IPV4 src -j ACCEPT
     sudo ip6tables -A $IPTABLES_CHAIN_IPV6 -m set --match-set $IPSET_NAME_IPV6 src -j ACCEPT
 fi
 
-# Apply the new chains to incoming connections on the INPUT chain if COUNTRY_CODES is not empty
-if [ ${#COUNTRY_CODES[@]} -gt 0 ]; then
-    sudo iptables -A INPUT -j $IPTABLES_CHAIN_IPV4
-    sudo ip6tables -A INPUT -j $IPTABLES_CHAIN_IPV6
-fi
+# Apply the new chains to incoming connections on the INPUT chain
+echo "Applying the new iptables chains to incoming connections."
+sudo iptables -A INPUT -j $IPTABLES_CHAIN_IPV4
+sudo ip6tables -A INPUT -j $IPTABLES_CHAIN_IPV6
 
 # Create directory if it doesn't exist
+echo "Creating directory for saving iptables rules if it doesn't exist."
 sudo mkdir -p /etc/iptables
 
 # Save the iptables rules
+echo "Saving the iptables rules."
 sudo iptables-save > /etc/iptables/rules.v4
 sudo ip6tables-save > /etc/iptables/rules.v6
 
 # Save the ipset rules
+echo "Saving the ipset rules."
 sudo ipset save > /etc/ipset.conf
 
 # If netfilter-persistent is installed, reload the rules
 if command -v netfilter-persistent &> /dev/null; then
+    echo "Reloading the iptables rules using netfilter-persistent."
     sudo netfilter-persistent save
     sudo netfilter-persistent reload
 fi
@@ -221,6 +237,7 @@ fi
 # Check if the ipset restore service already exists
 if [ ! -f /etc/systemd/system/ipset-restore.service ]; then
     # Create ipset restore service
+    echo "Creating a systemd service to restore ipset rules at startup."
     cat << EOF | sudo tee /etc/systemd/system/ipset-restore.service
 [Unit]
 Description=Restore ipset rules
@@ -235,6 +252,7 @@ WantedBy=multi-user.target
 EOF
 
     # Enable and start the ipset restore service
+    echo "Enabling and starting the ipset restore service."
     sudo systemctl enable ipset-restore.service
     sudo systemctl start ipset-restore.service
 fi
