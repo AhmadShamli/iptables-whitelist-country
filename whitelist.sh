@@ -9,6 +9,9 @@ ALLOWED_IPS=("192.168.1.100" "192.168.1.101")
 # Specify the IP addresses you want to allow (IPv6)
 ALLOWED_IPS_V6=("2001:db8::1" "2001:db8::2")
 
+# Allowed ports from any IP
+ALLOWED_PORTS=("22" "80" "443")
+
 # Paths to MaxMind DB files
 LOCATIONS_DB="GeoLite2-Country-Locations-en.csv"
 BLOCKS_IPV4_DB="GeoLite2-Country-Blocks-IPv4.csv"
@@ -95,39 +98,42 @@ echo "Flushing ipsets."
 sudo ipset flush $IPSET_NAME_IPV4
 sudo ipset flush $IPSET_NAME_IPV6
 
-if [ "$FILES_MISSING" = false ]; then
-    echo "Getting IPs from GeoIP files."
-    # Map country ISO codes to geoname IDs
-    declare -A GEONAME_IDS
-    while IFS=',' read -r geoname_id locale_code continent_code continent_name country_iso_code country_name is_in_european_union; do
-        for country in "${COUNTRY_CODES[@]}"; do
-            if [[ "${country_iso_code^^}" == "${country^^}" ]]; then
-                GEONAME_IDS[$geoname_id]=1
+# Process country codes if not empty
+if [ ${#COUNTRY_CODES[@]} -gt 0 ]; then
+    if [ "$FILES_MISSING" = false ]; then
+        echo "Getting IPs from GeoIP files."
+        # Map country ISO codes to geoname IDs
+        declare -A GEONAME_IDS
+        while IFS=',' read -r geoname_id locale_code continent_code continent_name country_iso_code country_name is_in_european_union; do
+            for country in "${COUNTRY_CODES[@]}"; do
+                if [[ "${country_iso_code^^}" == "${country^^}" ]]; then
+                    GEONAME_IDS[$geoname_id]=1
+                fi
+            done
+        done < <(tail -n +2 $LOCATIONS_DB)
+
+        # Add IP ranges to the ipsets based on geoname IDs
+        while IFS=',' read -r network geoname_id registered_country_geoname_id represented_country_geoname_id is_anonymous_proxy is_satellite_provider is_anycast; do
+            if [[ -n "${GEONAME_IDS[$geoname_id]}" ]]; then
+                sudo ipset add $IPSET_NAME_IPV4 $network
             fi
-        done
-    done < <(tail -n +2 $LOCATIONS_DB)
+        done < <(tail -n +2 $BLOCKS_IPV4_DB)
 
-    # Add IP ranges to the ipsets based on geoname IDs
-    while IFS=',' read -r network geoname_id registered_country_geoname_id represented_country_geoname_id is_anonymous_proxy is_satellite_provider is_anycast; do
-        if [[ -n "${GEONAME_IDS[$geoname_id]}" ]]; then
-            sudo ipset add $IPSET_NAME_IPV4 $network
-        fi
-    done < <(tail -n +2 $BLOCKS_IPV4_DB)
-
-    while IFS=',' read -r network geoname_id registered_country_geoname_id represented_country_geoname_id is_anonymous_proxy is_satellite_provider is_anycast; do
-        if [[ -n "${GEONAME_IDS[$geoname_id]}" ]]; then
-            sudo ipset add $IPSET_NAME_IPV6 $network
-        fi
-    done < <(tail -n +2 $BLOCKS_IPV6_DB)
-else
-    # Fallback to ipdeny.com for each country
-    for COUNTRY_CODE in "${COUNTRY_CODES[@]}"; do
-        wget -O /tmp/${COUNTRY_CODE,,}.zone http://www.ipdeny.com/ipblocks/data/countries/${COUNTRY_CODE,,}.zone
-        for ip in $(cat /tmp/${COUNTRY_CODE,,}.zone); do
-            sudo ipset add $IPSET_NAME_IPV4 $ip
+        while IFS=',' read -r network geoname_id registered_country_geoname_id represented_country_geoname_id is_anonymous_proxy is_satellite_provider is_anycast; do
+            if [[ -n "${GEONAME_IDS[$geoname_id]}" ]]; then
+                sudo ipset add $IPSET_NAME_IPV6 $network
+            fi
+        done < <(tail -n +2 $BLOCKS_IPV6_DB)
+    else
+        # Fallback to ipdeny.com for each country
+        for COUNTRY_CODE in "${COUNTRY_CODES[@]}"; do
+            wget -O /tmp/${COUNTRY_CODE,,}.zone http://www.ipdeny.com/ipblocks/data/countries/${COUNTRY_CODE,,}.zone
+            for ip in $(cat /tmp/${COUNTRY_CODE,,}.zone); do
+                sudo ipset add $IPSET_NAME_IPV4 $ip
+            done
+            rm /tmp/${COUNTRY_CODE,,}.zone
         done
-        rm /tmp/${COUNTRY_CODE,,}.zone
-    done
+    fi
 fi
 
 # Flush existing rules
@@ -159,24 +165,42 @@ ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 # Allow ipv6 icmp, without it, ipv6 network might be unreachable as certain ipv6 important feature is not enabled (NDP)
 ip6tables -A INPUT -p icmpv6 -j ACCEPT
 
-# Allow incoming traffic from specific IP addresses
-for ip in "${ALLOWED_IPS[@]}"
-do
-    iptables -A INPUT -s "$ip" -j ACCEPT
-done
+# Allow incoming traffic from specific IP addresses if ALLOWED_IPS is not empty
+if [ ${#ALLOWED_IPS[@]} -gt 0 ]; then
+    for ip in "${ALLOWED_IPS[@]}"
+    do
+        iptables -A INPUT -s "$ip" -j ACCEPT
+    done
+fi
 
-for ip in "${ALLOWED_IPS_V6[@]}"
-do
-    ip6tables -A INPUT -s "$ip" -j ACCEPT
-done
+# Allow incoming traffic from specific IPv6 addresses if ALLOWED_IPS_V6 is not empty
+if [ ${#ALLOWED_IPS_V6[@]} -gt 0 ]; then
+    for ip in "${ALLOWED_IPS_V6[@]}"
+    do
+        ip6tables -A INPUT -s "$ip" -j ACCEPT
+    done
+fi
 
-# Add rules to allow traffic from the IP ranges in the ipsets
-sudo iptables -A $IPTABLES_CHAIN_IPV4 -m set --match-set $IPSET_NAME_IPV4 src -j ACCEPT
-sudo ip6tables -A $IPTABLES_CHAIN_IPV6 -m set --match-set $IPSET_NAME_IPV6 src -j ACCEPT
+# Allow incoming traffic on specified ports from any IP if ALLOWED_PORTS is not empty
+if [ ${#ALLOWED_PORTS[@]} -gt 0 ]; then
+    for port in "${ALLOWED_PORTS[@]}"
+    do
+        iptables -A INPUT -p tcp --dport "$port" -j ACCEPT
+        ip6tables -A INPUT -p tcp --dport "$port" -j ACCEPT
+    done
+fi
 
-# Apply the new chains to incoming connections on the INPUT chain
-sudo iptables -A INPUT -j $IPTABLES_CHAIN_IPV4
-sudo ip6tables -A INPUT -j $IPTABLES_CHAIN_IPV6
+# Add rules to allow traffic from the IP ranges in the ipsets if COUNTRY_CODES is not empty
+if [ ${#COUNTRY_CODES[@]} -gt 0 ]; then
+    sudo iptables -A $IPTABLES_CHAIN_IPV4 -m set --match-set $IPSET_NAME_IPV4 src -j ACCEPT
+    sudo ip6tables -A $IPTABLES_CHAIN_IPV6 -m set --match-set $IPSET_NAME_IPV6 src -j ACCEPT
+fi
+
+# Apply the new chains to incoming connections on the INPUT chain if COUNTRY_CODES is not empty
+if [ ${#COUNTRY_CODES[@]} -gt 0 ]; then
+    sudo iptables -A INPUT -j $IPTABLES_CHAIN_IPV4
+    sudo ip6tables -A INPUT -j $IPTABLES_CHAIN_IPV6
+fi
 
 # Create directory if it doesn't exist
 sudo mkdir -p /etc/iptables
@@ -215,4 +239,4 @@ EOF
     sudo systemctl start ipset-restore.service
 fi
 
-echo "IPTables and IPSet rules have been configured to allow only incoming connections from specified countries and whitelisted IPs."
+echo "IPTables and IPSet rules have been configured to allow only incoming connections from specified countries, whitelisted IPs, and specified ports from any IP."
